@@ -12,6 +12,9 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.bash import BashOperator
 from spotipy.oauth2 import SpotifyClientCredentials
 from airflow.providers.amazon.aws.operators.s3 import S3CreateObjectOperator
+from airflow.providers.amazon.aws.operators.s3 import S3CopyObjectOperator
+from airflow.providers.amazon.aws.operators.s3 import S3DeleteObjectsOperator
+from airflow.providers.amazon.aws.operators.glue import GlueJobOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 
 default_args = {
@@ -69,10 +72,43 @@ push_raw_data_to_s3 = S3CreateObjectOperator(
     replace=True,
     dag=dag)
 
+glue_transform_data_job = GlueJobOperator(
+    task_id='glue_transform_data_job',
+    aws_conn_id='aws-s3-bucket',
+    job_name='Spotify_Transformation_Spark',
+    script_location='s3://aws-glue-assets-946869378518-us-east-1/scripts/Spotify_Transformation_Spark.py',
+    region_name='us-east-1',
+    s3_bucket='aws-glue-assets-946869378518-us-east-1',
+    create_job_kwargs={
+            "GlueVersion": "5.0",
+            "NumberOfWorkers": 5,
+            "WorkerType": "G.1X",
+        },
+    dag=dag
+)
+
+copy_raw_data_to_archive = S3CopyObjectOperator(
+    task_id='copy_raw_data_to_archive',
+    source_bucket_name='airbnb-proj',
+    source_bucket_key='spotify/raw/to_be_processed/{{ ti.xcom_pull(task_ids="fetch_data_from_spotify", key="file_name") }}',
+    dest_bucket_name='airbnb-proj',
+    dest_bucket_key='spotify/raw/archived/{{ ti.xcom_pull(task_ids="fetch_data_from_spotify", key="file_name") }}',
+    aws_conn_id='aws-s3-bucket',
+    dag=dag
+)
+
+clear_raw_data = S3DeleteObjectsOperator(
+    task_id='clear_raw_data',
+    bucket='airbnb-proj',
+    keys=['spotify/raw/to_be_processed/{{ ti.xcom_pull(task_ids="fetch_data_from_spotify", key="file_name") }}'],
+    aws_conn_id='aws-s3-bucket',
+    dag=dag
+)
+
 end = EmptyOperator(
     task_id='end',
     dag=dag
 )
 
-start >> fetch_spotify_data >> push_raw_data_to_s3 >> end
+start >> fetch_spotify_data >> push_raw_data_to_s3 >> glue_transform_data_job >> copy_raw_data_to_archive >> clear_raw_data >> end
 
